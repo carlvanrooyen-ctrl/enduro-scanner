@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#14213d">
+<link rel="manifest" href="manifest.webmanifest">
+<title>Enduro Scanner</title>
+<style>
+  :root{--bg:#10151f;--card:#1b2333;--ink:#f1f5f9;--mute:#94a3b8;--ok:#16a34a;--warn:#d97706;--bad:#dc2626;--acc:#3b82f6}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.4 system-ui,sans-serif;padding-bottom:70px}
+  header{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:10px 14px;background:#14213d;position:sticky;top:0;z-index:5}
+  header b{font-size:17px}
+  #nfcState{font-size:12px;padding:3px 8px;border-radius:99px;background:#334155}
+  #nfcState.on{background:var(--ok)}
+  nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:#14213d;border-top:1px solid #334155;z-index:5}
+  nav button{flex:1;padding:16px 4px;background:none;border:0;color:var(--mute);font-size:15px}
+  nav button.on{color:#fff;border-top:3px solid var(--acc);font-weight:600}
+  section{display:none;padding:12px 14px}
+  section.on{display:block}
+  button.big{width:100%;padding:14px;border:0;border-radius:10px;background:var(--acc);color:#fff;font-size:17px;font-weight:600}
+  button.sm{padding:8px 12px;border:0;border-radius:8px;background:#334155;color:#fff;font-size:14px}
+  button.danger{background:#7f1d1d}
+  input[type=text],input[type=search]{width:100%;padding:12px;border-radius:10px;border:1px solid #334155;background:#0b1020;color:#fff;font-size:17px}
+  #result{margin:12px 0;padding:18px;border-radius:14px;background:var(--card);min-height:150px;text-align:center}
+  #result.ok{background:var(--ok)} #result.warn{background:var(--warn)} #result.bad{background:var(--bad)}
+  #result .bike{font-size:64px;font-weight:800;line-height:1}
+  #result .nm{font-size:22px;margin-top:4px} #result .sub{font-size:16px;opacity:.9;margin-top:6px}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  td,th{padding:6px 4px;border-bottom:1px solid #263248;text-align:left}
+  .mute{color:var(--mute)} .row{display:flex;gap:8px;margin:8px 0} .row>*{flex:1}
+  .rider{display:flex;justify-content:space-between;align-items:center;padding:10px;border-bottom:1px solid #263248}
+  .rider.sel{background:#1e3a8a} .tag{font-size:12px;color:var(--mute)} .tag.has{color:#4ade80}
+  textarea{width:100%;height:90px;background:#0b1020;color:#fff;border:1px solid #334155;border-radius:8px}
+  h3{margin:18px 0 6px}
+</style>
+</head>
+<body>
+<header><b>Enduro Scanner</b><span id="count" class="mute"></span><span id="nfcState">NFC off</span></header>
+
+<!-- SCAN -->
+<section id="scan" class="on">
+  <button class="big" id="startNfc">Start NFC scanning</button>
+  <div id="result"><div class="sub">Waiting for a tag…</div></div>
+  <div class="row">
+    <input type="search" id="manual" placeholder="Manual: bike no" inputmode="text" autocapitalize="characters">
+    <button class="sm" id="manualBtn" style="max-width:90px">Log</button>
+  </div>
+  <div class="row"><button class="sm" id="undo">Undo last scan</button></div>
+  <h3>Last scans</h3>
+  <table id="recent"></table>
+</section>
+
+<!-- SIGN-ON -->
+<section id="signon">
+  <p class="mute">Tap a rider, then scan their sticker. A tag can only belong to one rider.</p>
+  <input type="search" id="find" placeholder="Search bike no / name">
+  <div id="ridersList"></div>
+</section>
+
+<!-- DATA -->
+<section id="data">
+  <h3>1. Load riders</h3>
+  <p class="mute">Export the <b>Riders</b> sheet as CSV (needs RiderID, BikeNo, FirstName, LastName, Class, TagID).</p>
+  <input type="file" id="csvFile" accept=".csv,text/csv">
+  <div id="loaded" class="mute" style="margin-top:6px"></div>
+  <h3>2. Export (do this often)</h3>
+  <div class="row"><button class="big" id="expScans">Download scans.csv</button></div>
+  <div class="row"><button class="big" id="expTags" style="background:#475569">Download tags.csv</button></div>
+  <div class="row"><button class="sm" id="shareScans">Share scans…</button><button class="sm" id="copyScans">Copy scans</button></div>
+  <h3>Settings</h3>
+  <div class="row"><label class="mute">Min lap (minutes) – flags double taps</label><input type="text" id="minLap" inputmode="numeric"></div>
+  <h3>Danger zone</h3>
+  <div class="row"><button class="sm danger" id="clearScans">Clear ALL scans</button></div>
+  <p class="mute" id="clock"></p>
+</section>
+
+<nav>
+  <button data-t="scan" class="on">Scan</button>
+  <button data-t="signon">Sign-on</button>
+  <button data-t="data">Data</button>
+</nav>
+
+<script>
+"use strict";
+/* ---------- storage ---------- */
+const LS = {
+  get(k, d){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch(e){ return d; } },
+  set(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){ alert("Storage full/blocked - export now!"); } }
+};
+let riders = LS.get("riders", []);        // [{id,bike,first,last,cls,tag}]
+let scans  = LS.get("scans", []);         // [{iso,ms,tag,rid,note}]
+let minLap = LS.get("minLap", 10);
+const $ = id => document.getElementById(id);
+const save = () => { LS.set("riders", riders); LS.set("scans", scans); LS.set("minLap", minLap); };
+
+/* ---------- helpers ---------- */
+const pad = (n, l=2) => String(n).padStart(l, "0");
+function localIso(ms){            // local time with offset, e.g. 2026-10-24T09:15:03.250+02:00
+  const d = new Date(ms), o = -d.getTimezoneOffset(), s = o >= 0 ? "+" : "-", a = Math.abs(o);
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(),3)}${s}${pad(Math.floor(a/60))}:${pad(a%60)}`;
+}
+const hms = ms => { const d = new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+const fmtDur = s => { s = Math.round(s); return `${Math.floor(s/60)}:${pad(s%60)}`; };
+const normTag = t => String(t || "").replace(/[^0-9a-f]/gi, "").toUpperCase();
+const riderByTag = t => riders.find(r => r.tag && normTag(r.tag) === t);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function beep(f=880, d=120){
+  try { const c = beep.c || (beep.c = new (window.AudioContext||window.webkitAudioContext)());
+        const o = c.createOscillator(), g = c.createGain(); o.frequency.value = f; o.connect(g); g.connect(c.destination);
+        g.gain.value = .25; o.start(); o.stop(c.currentTime + d/1000); } catch(e){}
+}
+const buzz = p => { try { navigator.vibrate && navigator.vibrate(p); } catch(e){} };
+
+function parseCsv(text){
+  const rows = []; let row = [], f = "", q = false;
+  text = text.replace(/^﻿/, "");
+  for (let i = 0; i < text.length; i++){
+    const c = text[i];
+    if (q){ if (c === '"'){ if (text[i+1] === '"'){ f += '"'; i++; } else q = false; } else f += c; }
+    else if (c === '"') q = true;
+    else if (c === ","){ row.push(f); f = ""; }
+    else if (c === "\n" || c === "\r"){ if (c === "\r" && text[i+1] === "\n") i++; row.push(f); f = ""; if (row.some(x => x !== "")) rows.push(row); row = []; }
+    else f += c;
+  }
+  if (f !== "" || row.length){ row.push(f); if (row.some(x => x !== "")) rows.push(row); }
+  return rows;
+}
+const csvCell = v => /[",\n\r]/.test(String(v ?? "")) ? `"${String(v ?? "").replace(/"/g, '""')}"` : String(v ?? "");
+const toCsv = (head, rows) => [head, ...rows].map(r => r.map(csvCell).join(",")).join("\r\n") + "\r\n";
+
+/* ---------- core: handle a tag ---------- */
+let mode = "scan", selected = null;
+function setResult(cls, bike, name, sub){
+  const el = $("result"); el.className = cls;
+  el.innerHTML = `<div class="bike">${esc(bike)}</div><div class="nm">${esc(name)}</div><div class="sub">${esc(sub)}</div>`;
+}
+function validScansFor(key){        // key = tag; ignore double taps for lap counting (display only)
+  const mine = scans.filter(s => s.tag === key && !String(s.note).startsWith("DUP"));
+  return mine;
+}
+function handleTag(raw, manualRider){
+  const tag = manualRider ? normTag(manualRider.tag) || ("MANUAL-" + manualRider.id) : normTag(raw);
+  if (!tag) return;
+  if (mode === "signon") return signonTag(tag);
+
+  const ms = Date.now(), r = manualRider || riderByTag(tag);
+  const prev = validScansFor(tag).slice(-1)[0];
+  let note = manualRider ? "MANUAL" : "";
+  let cls = "ok", sub;
+  if (!r){
+    cls = "bad"; note = "UNKNOWN"; setResult("bad", "?", "Unknown tag", tag);
+    beep(220, 400); buzz([300, 100, 300]);
+  } else {
+    const lapNo = validScansFor(tag).length + 1;
+    if (prev && (ms - prev.ms) < minLap*60000){
+      cls = "warn"; note = "DUP " + note;
+      setResult("warn", r.bike, `${r.first} ${r.last}`, `DOUBLE TAP – last scan ${fmtDur((ms-prev.ms)/1000)} ago (ignored)`);
+      beep(330, 300); buzz([200, 80, 200]);
+    } else {
+      sub = prev ? `${r.cls} · scan #${lapNo} · lap ${fmtDur((ms-prev.ms)/1000)}` : `${r.cls} · scan #${lapNo}`;
+      setResult("ok", r.bike, `${r.first} ${r.last}`, sub);
+      beep(880, 120); buzz(80);
+    }
+  }
+  scans.push({iso: localIso(ms), ms, tag, rid: r ? r.id : "", note: note.trim()});
+  save(); renderRecent();
+}
+function signonTag(tag){
+  if (!selected){ setResult("warn", "–", "Pick a rider first", "Go to Sign-on, tap a rider"); return; }
+  const other = riders.find(r => r.tag && normTag(r.tag) === tag && r.id !== selected.id);
+  if (other){ alert(`Tag already assigned to #${other.bike} ${other.first} ${other.last}`); beep(220, 400); return; }
+  selected.tag = tag; save(); beep(1000, 150); buzz(80);
+  const nm = `#${selected.bike} ${selected.first} ${selected.last}`; selected = null;
+  renderRiders(); $("find").value = ""; setStatus(`Linked ${tag} → ${nm}`);
+}
+let statusT; function setStatus(msg){ $("signon").querySelector("p").textContent = msg; clearTimeout(statusT); }
+
+/* ---------- renderers ---------- */
+function renderRecent(){
+  const last = scans.slice(-15).reverse();
+  $("recent").innerHTML = last.map(s => {
+    const r = riders.find(x => x.id === s.rid);
+    return `<tr><td>${hms(s.ms)}</td><td><b>${esc(r ? r.bike : "?")}</b></td><td>${esc(r ? r.first + " " + r.last : s.tag)}</td><td class="mute">${esc(s.note)}</td></tr>`;
+  }).join("");
+  $("count").textContent = `${scans.length} scans`;
+}
+function renderRiders(){
+  const q = $("find").value.trim().toLowerCase();
+  const list = riders.filter(r => !q || `${r.bike} ${r.first} ${r.last}`.toLowerCase().includes(q))
+                     .sort((a,b) => a.cls.localeCompare(b.cls) || String(a.bike).localeCompare(String(b.bike), undefined, {numeric:true}));
+  $("ridersList").innerHTML = list.map(r =>
+    `<div class="rider ${selected && selected.id===r.id ? "sel":""}" data-id="${r.id}">
+       <div><b>#${esc(r.bike)}</b> ${esc(r.first)} ${esc(r.last)}<div class="tag ${r.tag?"has":""}">${esc(r.cls)} · ${r.tag ? "tag " + esc(r.tag) : "no tag"}</div></div>
+       ${r.tag ? `<button class="sm" data-clr="${r.id}">Clear</button>` : ""}
+     </div>`).join("") || `<p class="mute">No riders loaded – use the Data tab.</p>`;
+}
+function renderLoaded(){
+  const n = riders.length, t = riders.filter(r => r.tag).length;
+  $("loaded").textContent = n ? `${n} riders loaded, ${t} with tags` : "No riders loaded";
+}
+
+/* ---------- events ---------- */
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x === b));
+  document.querySelectorAll("section").forEach(s => s.classList.toggle("on", s.id === b.dataset.t));
+  mode = b.dataset.t === "signon" ? "signon" : "scan"; selected = null;
+  if (mode === "signon"){ $("signon").querySelector("p").textContent = "Tap a rider, then scan their sticker. A tag can only belong to one rider."; renderRiders(); }
+  if (b.dataset.t === "data") renderLoaded();
+});
+$("find").oninput = renderRiders;
+$("ridersList").onclick = e => {
+  const clr = e.target.closest("[data-clr]");
+  if (clr){ const r = riders.find(x => x.id === clr.dataset.clr); if (r && confirm(`Clear tag for #${r.bike}?`)){ r.tag = ""; save(); renderRiders(); } return; }
+  const el = e.target.closest(".rider"); if (!el) return;
+  selected = riders.find(r => r.id === el.dataset.id); renderRiders();
+  setStatus(`Now scan the sticker for #${selected.bike} ${selected.first} ${selected.last}`);
+};
+$("manualBtn").onclick = () => {
+  const b = $("manual").value.trim().toUpperCase(); if (!b) return;
+  const cand = riders.filter(r => String(r.bike).toUpperCase() === b);
+  if (cand.length !== 1){ setResult("bad", b, cand.length ? "Duplicate bike no – use tag" : "No such bike no", ""); return; }
+  const r = cand[0];
+  if (!r.tag){ setResult("bad", r.bike, "No tag linked yet", "Do sign-on first"); return; }
+  handleTag(r.tag, r); $("manual").value = "";
+};
+$("undo").onclick = () => { const s = scans[scans.length-1]; if (s && confirm(`Remove last scan (${hms(s.ms)})?`)){ scans.pop(); save(); renderRecent(); setResult("", "", "Last scan removed", ""); } };
+
+$("csvFile").onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  const rows = parseCsv(await f.text()); const h = rows[0].map(x => x.trim().toLowerCase());
+  const ix = n => h.indexOf(n.toLowerCase());
+  const need = ["RiderID","BikeNo","FirstName","LastName","Class"].filter(n => ix(n) < 0);
+  if (need.length){ alert("Missing columns: " + need.join(", ")); return; }
+  const old = Object.fromEntries(riders.map(r => [r.id, r.tag]));
+  riders = rows.slice(1).map(r => ({id: r[ix("RiderID")].trim(), bike: r[ix("BikeNo")].trim(), first: r[ix("FirstName")].trim(),
+     last: r[ix("LastName")].trim(), cls: r[ix("Class")].trim(), tag: normTag(ix("TagID")>=0 ? r[ix("TagID")] : "") || old[r[ix("RiderID")].trim()] || ""}))
+     .filter(r => r.id);
+  save(); renderLoaded();
+};
+function download(name, text){
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], {type: "text/csv"}));
+  a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
+const scansCsv = () => toCsv(["local_iso","epoch_ms","tag_id","rider_id","note"], scans.map(s => [s.iso, s.ms, s.tag, s.rid, s.note]));
+const stamp = () => localIso(Date.now()).slice(0,19).replace(/[-:]/g,"").replace("T","_");
+$("expScans").onclick = () => download(`scans_${stamp()}.csv`, scansCsv());
+$("expTags").onclick = () => download(`tags_${stamp()}.csv`, toCsv(["RiderID","TagID"], riders.filter(r => r.tag).map(r => [r.id, r.tag])));
+$("copyScans").onclick = async () => { try { await navigator.clipboard.writeText(scansCsv()); alert("Copied"); } catch(e){ alert("Copy failed – use Download"); } };
+$("shareScans").onclick = async () => {
+  try { const f = new File([scansCsv()], `scans_${stamp()}.csv`, {type:"text/csv"});
+        if (navigator.canShare && navigator.canShare({files:[f]})) await navigator.share({files:[f]}); else alert("Share not supported – use Download"); } catch(e){}
+};
+$("clearScans").onclick = () => { if (confirm("Delete ALL scans on this phone? Export first!") && confirm("Really delete?")){ scans = []; save(); renderRecent(); } };
+$("minLap").value = minLap;
+$("minLap").onchange = () => { const v = parseFloat($("minLap").value); if (v > 0){ minLap = v; save(); } };
+
+/* ---------- NFC ---------- */
+let wake = null;
+async function keepAwake(){ try { wake = await navigator.wakeLock.request("screen"); } catch(e){} }
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && $("nfcState").classList.contains("on")) keepAwake(); });
+$("startNfc").onclick = async () => {
+  if (!("NDEFReader" in window)){ alert("Web NFC not available. Use Chrome on Android over HTTPS, with NFC switched on."); return; }
+  try {
+    const rd = new NDEFReader(); await rd.scan();
+    rd.onreading = e => handleTag(e.serialNumber);
+    rd.onreadingerror = () => setResult("bad", "!", "Tag read error", "Hold the phone steady and retry");
+    $("nfcState").textContent = "NFC on"; $("nfcState").className = "on"; $("startNfc").textContent = "NFC scanning is ON"; keepAwake();
+  } catch(err){ alert("NFC start failed: " + err.message); }
+};
+
+/* ---------- boot ---------- */
+setInterval(() => { $("clock").textContent = "Phone clock: " + hms(Date.now()) + " – must match the start clock"; }, 1000);
+renderRecent(); renderLoaded();
+if ("serviceWorker" in navigator && (location.protocol === "https:" || location.hostname === "localhost"))
+  navigator.serviceWorker.register("sw.js").catch(() => {});
+window.__test = { handleTag, get scans(){ return scans; }, get riders(){ return riders; }, setMode: m => { mode = m; }, setSel: id => { selected = riders.find(r => r.id === id); } };
+</script>
+</body>
+</html>

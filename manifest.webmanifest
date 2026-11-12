@@ -1,0 +1,9 @@
+{
+  "name": "Enduro Scanner",
+  "short_name": "Scanner",
+  "start_url": "index.html",
+  "display": "standalone",
+  "background_color": "#10151f",
+  "theme_color": "#14213d",
+  "icons": []
+}
